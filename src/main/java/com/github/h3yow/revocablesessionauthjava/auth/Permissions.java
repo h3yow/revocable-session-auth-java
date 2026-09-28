@@ -17,6 +17,8 @@ public final class Permissions {
     public static final String ROLE_USER = "ROLE_USER";
     public static final String PROFILE_READ = "profile:read";
     public static final String ADMIN_STATS = "admin:stats";
+    /** 管理员会话治理（查看会话概览、强制下线、调整角色）。 */
+    public static final String ADMIN_SESSIONS = "admin:sessions";
 
     private Permissions() {
     }

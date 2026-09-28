@@ -20,8 +20,10 @@ import org.springframework.stereotype.Component;
  * <p>
  * 校验顺序与失败分类（对外仅给分类，底层异常只记日志）：
  * <ol>
- *   <li>结构/编码/JSON 无法解析 -> MALFORMED_TOKEN</li>
- *   <li>签名不匹配或内容被篡改 -> INVALID_SIGNATURE</li>
+ *   <li>结构/编码无法解析 -> MALFORMED_TOKEN</li>
+ *   <li>签名段根本不具备 HMAC-SHA256 输出形态（长度不符、明显伪造）-> INVALID_SIGNATURE</li>
+ *   <li>签名形态合法但与重算值不一致：payload 被篡改，或由别的密钥签发 -> TAMPERED_TOKEN</li>
+ *   <li>签名通过但 claims JSON/必填字段非法 -> MALFORMED_TOKEN</li>
  *   <li>expiresAt &lt;= now -> EXPIRED</li>
  *   <li>令牌类型与使用场景不符 -> WRONG_TOKEN_TYPE</li>
  * </ol>
@@ -101,10 +103,20 @@ public class HmacTokenService implements TokenService {
             throw malformed(compactToken, "base64url 解码失败: " + e.getClass().getSimpleName());
         }
 
+        // 签名段连 HMAC-SHA256 的输出形态都不具备：属于伪造/拼接的签名，而非"内容被改动"
+        if (signature.length != 32) {
+            log.warn("签名长度不符合 HmacSHA256 输出 expectedType={} actualLen={}",
+                    expectedType, signature.length);
+            throw new AuthException(AuthFailureReason.INVALID_SIGNATURE,
+                    "signature length is " + signature.length);
+        }
+
         byte[] expected = hmac(payload);
         if (!constantTimeEquals(expected, signature)) {
-            log.warn("令牌签名校验失败（可能伪造或被篡改） expectedType={}", expectedType);
-            throw new AuthException(AuthFailureReason.INVALID_SIGNATURE, "signature mismatch");
+            // 签名形态合法但与重算值不一致：payload 在传输中被改动，或令牌由别的密钥签发。
+            // 两种情形对校验端的可观测结论一致——随附签名不能证明当前内容，归为内容篡改。
+            log.warn("令牌内容与签名不一致（payload 被篡改或跨密钥签发） expectedType={}", expectedType);
+            throw new AuthException(AuthFailureReason.TAMPERED_TOKEN, "signature does not match payload");
         }
 
         TokenClaims claims;

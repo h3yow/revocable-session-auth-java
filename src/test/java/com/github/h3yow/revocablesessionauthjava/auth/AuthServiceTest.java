@@ -9,6 +9,7 @@ import com.github.h3yow.revocablesessionauthjava.support.AuthAssertions;
 import com.github.h3yow.revocablesessionauthjava.support.AuthTestLogger;
 import com.github.h3yow.revocablesessionauthjava.support.MutableClock;
 import com.github.h3yow.revocablesessionauthjava.support.TestClockConfig;
+import com.github.h3yow.revocablesessionauthjava.token.TokenService;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
@@ -36,6 +37,9 @@ class AuthServiceTest {
 
     @Autowired
     private AuthService authService;
+
+    @Autowired
+    private TokenService tokenService;
 
     @Autowired
     private MutableClock clock;
@@ -188,16 +192,33 @@ class AuthServiceTest {
     }
 
     @Test
-    @DisplayName("结构不合法或内容篡改的访问令牌：MALFORMED / INVALID_SIGNATURE")
+    @DisplayName("结构不合法或内容篡改的访问令牌：MALFORMED / TAMPERED_TOKEN")
     void malformedAndTamperedAccessTokens() {
         TokenPair pair = authService.login("alice", "alice123");
         AuthTestLogger.input(log, "访问令牌='garbage' 与篡改串");
         AuthAssertions.assertFailure(log, AuthFailureReason.MALFORMED_TOKEN,
                 () -> authService.authenticateAccessToken("garbage"));
         String tampered = "x" + pair.accessToken().substring(1);
-        AuthTestLogger.basis(log, "payload 翻转一个字符导致 HMAC 不匹配");
-        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+        AuthTestLogger.basis(log, "payload 翻转一个字符，签名形态合法但重算 HMAC 不一致 -> TAMPERED_TOKEN");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
                 () -> authService.authenticateAccessToken(tampered));
+    }
+
+    @Test
+    @DisplayName("令牌与服务端登记对不上：无会话/无刷新令牌登记 -> SESSION_TOKEN_MISMATCH")
+    void tokenNotMatchingServerRegistration() {
+        AuthTestLogger.input(log, "用本服务密钥签发指向不存在会话的访问令牌与刷新令牌");
+        com.github.h3yow.revocablesessionauthjava.token.TokenClaims ghostAccess =
+                tokenService.issue("sess-ghost", "alice", 0, TokenType.ACCESS);
+        AuthAssertions.assertFailure(log, AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                () -> authService.authenticateAccessToken(tokenService.sign(ghostAccess)));
+
+        com.github.h3yow.revocablesessionauthjava.token.TokenClaims ghostRefresh =
+                tokenService.issue("sess-ghost", "alice", 0, TokenType.REFRESH);
+        AuthTestLogger.basis(log, "刷新令牌签名合法但服务端无 jti 登记");
+        AuthAssertions.assertFailure(log, AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                () -> authService.refresh(tokenService.sign(ghostRefresh)));
+        AuthTestLogger.result(log, "无登记场景与登记对不上场景统一稳定落 SESSION_TOKEN_MISMATCH");
     }
 
     private static String abbreviate(String token) {

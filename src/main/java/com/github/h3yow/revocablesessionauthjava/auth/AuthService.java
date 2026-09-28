@@ -13,5 +13,6 @@ public interface AuthService {
 
     Authentication authenticateAccessToken(String rawAccessToken);
 
-    void changeRoles(String username, java.util.Set<String> newRoles);
+    /** 调整用户角色：更新账户目录并提升其全部会话版本，返回账户是否存在与受影响会话数。 */
+    RoleChangeResult changeRoles(String username, java.util.Set<String> newRoles);
 }

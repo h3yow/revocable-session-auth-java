@@ -66,8 +66,24 @@ public final class Session {
         return revoked;
     }
 
-    /** 权限/角色变更：更新集合并提升版本，使此前签发的访问令牌按 SESSION_STATE_CHANGED 拒绝。 */
-    void updateRoles(Set<String> newRoles, Set<String> newPermissions) {
+    /**
+     * 读取会话的安全判定快照（撤销标志 + 版本）。与 {@link #revoke()}、{@link #updateRoles}、
+     * 刷新换发共用同一把监视器锁：访问校验不会在"刷新刚签发、撤销尚未落定"的窗口读到旧状态，
+     * 从而保证撤销与并发访问/刷新竞争时结论稳定。
+     */
+    synchronized long snapshotVersionIfActive() {
+        if (revoked) {
+            return -1L;
+        }
+        return version.get();
+    }
+
+    /**
+     * 权限/角色变更：更新集合并提升版本，使此前签发的访问令牌按 SESSION_STATE_CHANGED 拒绝。
+     * 与 {@link #revoke()}、刷新换发共用同一把监视器锁：角色变更与"判定+签发"互斥，
+     * 新签发的令牌一定携带变更后的版本号，不会出现按旧角色放行的新令牌。
+     */
+    synchronized void updateRoles(Set<String> newRoles, Set<String> newPermissions) {
         this.roles = Set.copyOf(newRoles);
         this.permissions = Set.copyOf(newPermissions);
         version.incrementAndGet();

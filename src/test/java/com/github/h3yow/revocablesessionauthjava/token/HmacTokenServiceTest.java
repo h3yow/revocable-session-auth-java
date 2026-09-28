@@ -48,25 +48,25 @@ class HmacTokenServiceTest {
     }
 
     @Test
-    @DisplayName("内容被篡改：payload 改动 -> INVALID_SIGNATURE")
+    @DisplayName("内容被篡改：payload 改动但签名形态合法 -> TAMPERED_TOKEN")
     void tamperedPayloadRejected() {
         TokenClaims claims = tokenService.issue("sess-1", "alice", 0, TokenType.ACCESS);
         String compact = tokenService.sign(claims);
         String tampered = flipPayloadCharacter(compact);
         AuthTestLogger.input(log, "原始={} 篡改后={}", abbreviate(compact), abbreviate(tampered));
-        AuthTestLogger.basis(log, "payload 段被修改，重算 HMAC 与随附签名不一致");
-        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+        AuthTestLogger.basis(log, "签名段形态合法但与 payload 重算的 HMAC 不一致 -> TAMPERED_TOKEN");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
                 () -> tokenService.parseAndVerify(tampered, TokenType.ACCESS));
     }
 
     @Test
-    @DisplayName("伪造签名：随机签名段 -> INVALID_SIGNATURE")
+    @DisplayName("伪造签名：长度不符的随机签名段 -> INVALID_SIGNATURE")
     void forgedSignatureRejected() {
         TokenClaims claims = tokenService.issue("sess-1", "alice", 0, TokenType.ACCESS);
         String compact = tokenService.sign(claims);
         String forged = compact.substring(0, compact.lastIndexOf('.') + 1) + "AAAAAAAAAAAAAAAAAAAA";
-        AuthTestLogger.input(log, "合法 payload + 攻击者伪造签名段");
-        AuthTestLogger.basis(log, "签名段无法通过 HMAC 常量时间比较");
+        AuthTestLogger.input(log, "合法 payload + 攻击者伪造的短签名段（解码 15 字节）");
+        AuthTestLogger.basis(log, "签名段连 HMAC-SHA256 的 32 字节输出形态都不具备 -> INVALID_SIGNATURE");
         AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
                 () -> tokenService.parseAndVerify(forged, TokenType.ACCESS));
     }
@@ -122,13 +122,13 @@ class HmacTokenServiceTest {
     }
 
     @Test
-    @DisplayName("跨密钥伪造：用另一密钥签发的令牌 -> INVALID_SIGNATURE")
+    @DisplayName("跨密钥签发：外形合法但服务端密钥重算不一致 -> TAMPERED_TOKEN")
     void differentSecretRejected() {
         HmacTokenService attacker = new HmacTokenService(clock, "attacker-secret-999999", 300, 3600);
         String forged = attacker.sign(attacker.issue("sess-1", "alice", 0, TokenType.ACCESS));
-        AuthTestLogger.input(log, "攻击者用独立密钥签发外形合法的令牌");
-        AuthTestLogger.basis(log, "服务端密钥重算签名不匹配，证明密钥隔离有效");
-        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+        AuthTestLogger.input(log, "攻击者用独立密钥签发外形完全合法的令牌");
+        AuthTestLogger.basis(log, "签名形态合法但与本服务密钥重算值不一致，对校验端等同内容被改动 -> TAMPERED_TOKEN");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
                 () -> tokenService.parseAndVerify(forged, TokenType.ACCESS));
     }
 
