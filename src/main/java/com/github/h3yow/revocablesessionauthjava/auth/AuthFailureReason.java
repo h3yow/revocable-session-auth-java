@@ -8,7 +8,9 @@ public enum AuthFailureReason {
 
     MISSING_TOKEN("missing_token", "缺少访问令牌"),
     MALFORMED_TOKEN("malformed_token", "令牌格式不合法"),
-    INVALID_SIGNATURE("invalid_signature", "令牌签名无效或内容已被篡改"),
+    INVALID_SIGNATURE("invalid_signature", "令牌签名无效"),
+    TAMPERED_TOKEN("tampered_token", "令牌内容已被篡改"),
+    SESSION_TOKEN_MISMATCH("session_token_mismatch", "令牌与服务端会话记录不一致"),
     WRONG_TOKEN_TYPE("wrong_token_type", "令牌类型与使用场景不匹配"),
     EXPIRED("expired_token", "令牌已过期"),
     SESSION_REVOKED("session_revoked", "会话已被撤销"),

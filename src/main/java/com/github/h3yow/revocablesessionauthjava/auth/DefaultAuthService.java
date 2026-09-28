@@ -2,6 +2,7 @@ package com.github.h3yow.revocablesessionauthjava.auth;
 
 import com.github.h3yow.revocablesessionauthjava.token.TokenClaims;
 import com.github.h3yow.revocablesessionauthjava.token.TokenService;
+import java.time.Clock;
 import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -29,16 +30,19 @@ public class DefaultAuthService implements AuthService {
     private final TokenService tokenService;
     private final SessionStore sessionStore;
     private final UserDirectory userDirectory;
+    private final Clock clock;
     private final long accessTtlSeconds;
 
     public DefaultAuthService(
             TokenService tokenService,
             SessionStore sessionStore,
             UserDirectory userDirectory,
+            Clock clock,
             @Value("${app.auth.access-token-ttl-seconds}") long accessTtlSeconds) {
         this.tokenService = tokenService;
         this.sessionStore = sessionStore;
         this.userDirectory = userDirectory;
+        this.clock = clock;
         this.accessTtlSeconds = accessTtlSeconds;
     }
 
@@ -57,7 +61,8 @@ public class DefaultAuthService implements AuthService {
 
         Set<String> permissions = Permissions.forRoles(account.roles());
         Session session = new Session(
-                "sess-" + UUID.randomUUID(), account.username(), account.roles(), permissions);
+                "sess-" + UUID.randomUUID(), account.username(), account.roles(), permissions,
+                clock.millis());
         sessionStore.saveSession(session);
         TokenPair pair = issuePair(session);
         log.info("登录结果 SUCCESS basis=凭据匹配 username={} sessionId={} refreshJti 已登记",
@@ -81,6 +86,14 @@ public class DefaultAuthService implements AuthService {
                             "refresh token not registered, jti=" + claims.tokenId());
                 });
 
+        // 阶段2.5：令牌声明与服务端登记必须一致（防止拼接/挪用其他会话的令牌）
+        if (!record.sessionId().equals(claims.sessionId())) {
+            log.info("刷新结果 reason=SESSION_TOKEN_MISMATCH basis=登记会话{} != 声明会话{} jti={}",
+                    record.sessionId(), claims.sessionId(), claims.tokenId());
+            throw new AuthException(AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                    "refresh token registered to different session, jti=" + claims.tokenId());
+        }
+
         // 阶段3：CAS 抢占 —— 并发下只有一个线程能把 false 翻成 true
         if (!record.used().compareAndSet(false, true)) {
             log.info("刷新结果 reason=REFRESH_TOKEN_REUSED basis=刷新令牌 used=true jti={} sessionId={}",
@@ -97,13 +110,27 @@ public class DefaultAuthService implements AuthService {
                     return new AuthException(AuthFailureReason.UNKNOWN_TOKEN,
                             "session missing, id=" + record.sessionId());
                 });
-        if (session.revoked()) {
-            log.info("刷新结果 reason=SESSION_REVOKED basis=会话 revoked=true jti={} sessionId={}",
-                    record.jti(), session.id());
-            throw new AuthException(AuthFailureReason.SESSION_REVOKED, "session revoked, id=" + session.id());
+        if (!session.username().equals(claims.username())) {
+            log.info("刷新结果 reason=SESSION_TOKEN_MISMATCH basis=会话主体{} != 声明主体{} jti={}",
+                    session.username(), claims.username(), claims.tokenId());
+            throw new AuthException(AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                    "token subject differs from session owner, jti=" + claims.tokenId());
         }
 
-        TokenPair pair = issuePair(session);
+        // 阶段5：与 revoke() 互斥的临界区 —— 撤销与"判定未撤销+签发"不会交错，
+        // 强制下线要么先于刷新生效（本次刷新得到 SESSION_REVOKED），
+        // 要么晚于签发（新令牌随会话撤销立即失效），不存在撤销后被刷新"救活"的窗口。
+        TokenPair pair;
+        synchronized (session) {
+            if (session.revoked()) {
+                log.info("刷新结果 reason=SESSION_REVOKED basis=会话 revoked=true jti={} sessionId={}",
+                        record.jti(), session.id());
+                throw new AuthException(AuthFailureReason.SESSION_REVOKED,
+                        "session revoked, id=" + session.id());
+            }
+            pair = issuePair(session);
+            session.touch(clock.millis());
+        }
         log.info("刷新结果 SUCCESS basis=令牌有效且 CAS 抢占成功 jti={} sessionId={} -> 旧刷新令牌立即失效",
                 record.jti(), session.id());
         return pair;
@@ -136,6 +163,12 @@ public class DefaultAuthService implements AuthService {
                     return new AuthException(AuthFailureReason.UNKNOWN_TOKEN,
                             "session missing, id=" + claims.sessionId());
                 });
+        if (!session.username().equals(claims.username())) {
+            log.info("访问判定结果 reason=SESSION_TOKEN_MISMATCH basis=会话主体{} != 声明主体{} jti={} sessionId={}",
+                    session.username(), claims.username(), claims.tokenId(), session.id());
+            throw new AuthException(AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                    "token subject differs from session owner, jti=" + claims.tokenId());
+        }
         if (session.revoked()) {
             log.info("访问判定结果 reason=SESSION_REVOKED basis=会话 revoked=true jti={} sessionId={}",
                     claims.tokenId(), session.id());
@@ -149,6 +182,7 @@ public class DefaultAuthService implements AuthService {
         }
 
         // 角色/权限实时取自会话，绝不信任令牌自携带内容
+        session.touch(clock.millis());
         Authentication auth = new Authentication(
                 session.username(), session.id(), claims.tokenId(),
                 Set.copyOf(session.roles()), Set.copyOf(session.permissions()));
@@ -162,13 +196,14 @@ public class DefaultAuthService implements AuthService {
         log.info("权限变更判定 input.username={} newRoles={}", username, newRoles);
         Set<String> safeRoles = newRoles == null ? Set.of() : Set.copyOf(newRoles);
         Set<String> permissions = Permissions.forRoles(safeRoles);
+        boolean accountUpdated = userDirectory.updateRoles(username, safeRoles);
         int affected = 0;
         for (Session session : sessionStore.findSessionsByUsername(username)) {
             session.updateRoles(safeRoles, permissions);
             affected++;
         }
-        log.info("权限变更结果 SUCCESS basis=更新 {} 个会话并提升版本 -> 旧访问令牌将以 SESSION_STATE_CHANGED 拒绝",
-                affected);
+        log.info("权限变更结果 SUCCESS basis=账户目录更新={} 更新 {} 个会话并提升版本 -> 旧访问令牌将以 SESSION_STATE_CHANGED 拒绝",
+                accountUpdated, affected);
     }
 
     private TokenPair issuePair(Session session) {
