@@ -9,6 +9,8 @@ import com.github.h3yow.revocablesessionauthjava.support.AuthAssertions;
 import com.github.h3yow.revocablesessionauthjava.support.AuthTestLogger;
 import com.github.h3yow.revocablesessionauthjava.support.MutableClock;
 import com.github.h3yow.revocablesessionauthjava.support.TestClockConfig;
+import com.github.h3yow.revocablesessionauthjava.token.TokenClaims;
+import com.github.h3yow.revocablesessionauthjava.token.TokenService;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
@@ -39,6 +41,12 @@ class AuthServiceTest {
 
     @Autowired
     private MutableClock clock;
+
+    @Autowired
+    private TokenService tokenService;
+
+    @Autowired
+    private SessionStore sessionStore;
 
     @Test
     @DisplayName("登录：正确凭据成功；错误密码/未知用户 -> BAD_CREDENTIALS")
@@ -188,19 +196,70 @@ class AuthServiceTest {
     }
 
     @Test
-    @DisplayName("结构不合法或内容篡改的访问令牌：MALFORMED / INVALID_SIGNATURE")
+    @DisplayName("结构不合法 -> MALFORMED_TOKEN；内容篡改 -> TAMPERED_TOKEN；伪造签名 -> INVALID_SIGNATURE")
     void malformedAndTamperedAccessTokens() {
         TokenPair pair = authService.login("alice", "alice123");
-        AuthTestLogger.input(log, "访问令牌='garbage' 与篡改串");
+        AuthTestLogger.input(log, "访问令牌='garbage' 与翻转载荷字节的串");
         AuthAssertions.assertFailure(log, AuthFailureReason.MALFORMED_TOKEN,
                 () -> authService.authenticateAccessToken("garbage"));
-        String tampered = "x" + pair.accessToken().substring(1);
-        AuthTestLogger.basis(log, "payload 翻转一个字符导致 HMAC 不匹配");
-        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+        String byteFlipped = "x" + pair.accessToken().substring(1);
+        AuthTestLogger.basis(log, "翻转首字符后 claims JSON 不可解析，属于结构不合法");
+        AuthAssertions.assertFailure(log, AuthFailureReason.MALFORMED_TOKEN,
+                () -> authService.authenticateAccessToken(byteFlipped));
+
+        String tampered = tamperUsername(pair.accessToken(), "carol");
+        AuthTestLogger.basis(log, "手工改写 username 并带空白，载荷非签发端规范化字节");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
                 () -> authService.authenticateAccessToken(tampered));
+
+        String forged = pair.accessToken().substring(0, pair.accessToken().lastIndexOf('.') + 1)
+                + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        AuthTestLogger.basis(log, "载荷完好、仅伪造签名段 -> INVALID_SIGNATURE");
+        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+                () -> authService.authenticateAccessToken(forged));
+    }
+
+    @Test
+    @DisplayName("令牌合法但与服务端记录对不上：别的会话/主体 -> SESSION_TOKEN_MISMATCH；无登记 -> UNKNOWN_TOKEN")
+    void bindingMismatchAndUnknownRegistration() {
+        TokenPair pair = authService.login("alice", "alice123");
+        Session session = sessionStore.findSession(
+                authService.authenticateAccessToken(pair.accessToken()).sessionId()).orElseThrow();
+
+        // 签名合法、结构合法、未过期，但声明主体与会话实际主体不一致
+        TokenClaims foreign = tokenService.issue(session.id(), "mallory", session.version(), TokenType.ACCESS);
+        String mismatched = tokenService.sign(foreign);
+        AuthTestLogger.input(log, "用真实密钥给会话 {} 签发 username=mallory 的访问令牌", session.id());
+        AuthTestLogger.basis(log, "签名校验通过，但声明主体 != 会话登记主体");
+        AuthAssertions.assertFailure(log, AuthFailureReason.SESSION_TOKEN_MISMATCH,
+                () -> authService.authenticateAccessToken(mismatched));
+
+        // 声明的会话在服务端根本不存在
+        TokenClaims ghost = tokenService.issue("sess-not-in-store", "alice", 0, TokenType.ACCESS);
+        AuthTestLogger.basis(log, "令牌合法，但服务端已无此会话登记");
+        AuthAssertions.assertFailure(log, AuthFailureReason.UNKNOWN_TOKEN,
+                () -> authService.authenticateAccessToken(tokenService.sign(ghost)));
+
+        // 合法结构的刷新令牌但服务端无 jti 登记（例如其他实例签发）
+        TokenClaims unregistered = tokenService.issue(session.id(), "alice", 0, TokenType.REFRESH);
+        AuthAssertions.assertFailure(log, AuthFailureReason.UNKNOWN_TOKEN,
+                () -> authService.refresh(tokenService.sign(unregistered)));
     }
 
     private static String abbreviate(String token) {
         return token == null ? "<null>" : token.substring(0, Math.min(20, token.length())) + "...";
+    }
+
+    /** 手工改写 payload 中的 username 并以带空白 JSON 重新编码，模拟对令牌内容的篡改。 */
+    private static String tamperUsername(String compact, String newUsername) {
+        int dot = compact.indexOf('.');
+        String payload = compact.substring(0, dot);
+        String signaturePart = compact.substring(dot + 1);
+        byte[] raw = java.util.Base64.getUrlDecoder().decode(payload);
+        String json = new String(raw, java.nio.charset.StandardCharsets.UTF_8)
+                .replaceAll("\"username\":\"[^\"]*\"", "\"username\": \"" + newUsername + "\"");
+        String rewritten = java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return rewritten + "." + signaturePart;
     }
 }

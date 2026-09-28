@@ -10,7 +10,11 @@ import com.github.h3yow.revocablesessionauthjava.auth.TokenType;
 import com.github.h3yow.revocablesessionauthjava.support.AuthAssertions;
 import com.github.h3yow.revocablesessionauthjava.support.AuthTestLogger;
 import com.github.h3yow.revocablesessionauthjava.support.MutableClock;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -48,15 +52,39 @@ class HmacTokenServiceTest {
     }
 
     @Test
-    @DisplayName("内容被篡改：payload 改动 -> INVALID_SIGNATURE")
+    @DisplayName("内容被篡改：结构合法但 claims 字段被改写 -> TAMPERED_TOKEN")
     void tamperedPayloadRejected() {
         TokenClaims claims = tokenService.issue("sess-1", "alice", 0, TokenType.ACCESS);
         String compact = tokenService.sign(claims);
-        String tampered = flipPayloadCharacter(compact);
-        AuthTestLogger.input(log, "原始={} 篡改后={}", abbreviate(compact), abbreviate(tampered));
-        AuthTestLogger.basis(log, "payload 段被修改，重算 HMAC 与随附签名不一致");
-        AuthAssertions.assertFailure(log, AuthFailureReason.INVALID_SIGNATURE,
+        String tampered = rewriteUsername(compact, "carol");
+        AuthTestLogger.input(log, "原始={} 改写 username 后的载荷={}", abbreviate(compact), abbreviate(tampered));
+        AuthTestLogger.basis(log, "载荷可解析为合法 claims，但非签发端规范化字节，且 HMAC 不匹配");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
                 () -> tokenService.parseAndVerify(tampered, TokenType.ACCESS));
+    }
+
+    @Test
+    @DisplayName("值不变仅重排字段（载荷字节改变）-> TAMPERED_TOKEN")
+    void reorderedPayloadRejected() {
+        TokenClaims claims = tokenService.issue("sess-1", "alice", 0, TokenType.ACCESS);
+        String compact = tokenService.sign(claims);
+        String reordered = reorderFields(compact);
+        AuthTestLogger.input(log, "claims 值不变、仅字段顺序重排 -> {}", abbreviate(reordered));
+        AuthTestLogger.basis(log, "规范化重编码与提交载荷字节不一致 -> 内容被改动过");
+        AuthAssertions.assertFailure(log, AuthFailureReason.TAMPERED_TOKEN,
+                () -> tokenService.parseAndVerify(reordered, TokenType.ACCESS));
+    }
+
+    @Test
+    @DisplayName("翻转载荷字符导致 JSON 不可解析 -> MALFORMED_TOKEN（结构不合法）")
+    void byteFlipThatBreaksJsonRejected() {
+        TokenClaims claims = tokenService.issue("sess-1", "alice", 0, TokenType.ACCESS);
+        String compact = tokenService.sign(claims);
+        String broken = flipPayloadCharacter(compact);
+        AuthTestLogger.input(log, "翻转载荷首字符 -> {}", abbreviate(broken));
+        AuthTestLogger.basis(log, "解码后 claims JSON 无法解析，属于结构本身不合法");
+        AuthAssertions.assertFailure(log, AuthFailureReason.MALFORMED_TOKEN,
+                () -> tokenService.parseAndVerify(broken, TokenType.ACCESS));
     }
 
     @Test
@@ -133,12 +161,52 @@ class HmacTokenServiceTest {
     }
 
 
-    /** 将 payload 段首字符做 base64url 安全的翻转，模拟内容被篡改。 */
+    /** 将 payload 段首字符做 base64url 安全的翻转，模拟载荷字节被改动（通常破坏 JSON 结构）。 */
     private static String flipPayloadCharacter(String compact) {
         int dot = compact.indexOf('.');
         char first = compact.charAt(0);
         char flipped = first == 'A' ? 'B' : 'A';
         return flipped + compact.substring(1, dot) + compact.substring(dot);
+    }
+
+    /**
+     * 解码 payload，替换 username 字段值，并以手工编辑后带空白的 JSON 重新编码，签名段保持原样。
+     * 模拟对令牌内容的典型篡改：结构可解析，但载荷不再是签发端规范化字节。
+     */
+    private String rewriteUsername(String compact, String newUsername) {
+        int dot = compact.indexOf('.');
+        String payload = compact.substring(0, dot);
+        String signaturePart = compact.substring(dot + 1);
+        byte[] raw = Base64.getUrlDecoder().decode(payload);
+        String json = new String(raw, StandardCharsets.UTF_8)
+                .replaceAll("\"username\":\"[^\"]*\"", "\"username\": \"" + newUsername + "\"");
+        String rewritten = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(json.getBytes(StandardCharsets.UTF_8));
+        return rewritten + "." + signaturePart;
+    }
+
+    /** 值不变、仅重排 JSON 字段顺序，使载荷字节与签发端规范化结果不同。 */
+    private String reorderFields(String compact) {
+        int dot = compact.indexOf('.');
+        String payload = compact.substring(0, dot);
+        String signaturePart = compact.substring(dot + 1);
+        try {
+            JsonNode node = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(payload));
+            java.util.LinkedHashMap<String, Object> reordered = new java.util.LinkedHashMap<>();
+            reordered.put("type", node.get("type").asText());
+            reordered.put("tokenId", node.get("tokenId").asText());
+            reordered.put("sessionId", node.get("sessionId").asText());
+            reordered.put("username", node.get("username").asText());
+            reordered.put("version", node.get("version").asLong());
+            reordered.put("issuedAt", node.get("issuedAt").asLong());
+            reordered.put("expiresAt", node.get("expiresAt").asLong());
+            String json = new ObjectMapper().writeValueAsString(reordered);
+            String encoded = Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(json.getBytes(StandardCharsets.UTF_8));
+            return encoded + "." + signaturePart;
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static String abbreviate(String token) {

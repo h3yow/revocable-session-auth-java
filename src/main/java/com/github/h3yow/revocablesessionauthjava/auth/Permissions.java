@@ -17,6 +17,8 @@ public final class Permissions {
     public static final String ROLE_USER = "ROLE_USER";
     public static final String PROFILE_READ = "profile:read";
     public static final String ADMIN_STATS = "admin:stats";
+    public static final String ADMIN_SESSIONS = "admin:sessions";
+    public static final String ADMIN_ROLES = "admin:roles";
 
     private Permissions() {
     }

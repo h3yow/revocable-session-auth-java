@@ -197,13 +197,17 @@ public class DefaultAuthService implements AuthService {
         Set<String> safeRoles = newRoles == null ? Set.of() : Set.copyOf(newRoles);
         Set<String> permissions = Permissions.forRoles(safeRoles);
         boolean accountUpdated = userDirectory.updateRoles(username, safeRoles);
+        if (!accountUpdated) {
+            log.info("权限变更结果 reason=USER_NOT_FOUND basis=用户目录无此账户 username={}", username);
+            throw new AuthException(AuthFailureReason.USER_NOT_FOUND, "user not found: " + username);
+        }
         int affected = 0;
         for (Session session : sessionStore.findSessionsByUsername(username)) {
             session.updateRoles(safeRoles, permissions);
             affected++;
         }
-        log.info("权限变更结果 SUCCESS basis=账户目录更新={} 更新 {} 个会话并提升版本 -> 旧访问令牌将以 SESSION_STATE_CHANGED 拒绝",
-                accountUpdated, affected);
+        log.info("权限变更结果 SUCCESS basis=账户目录已更新 更新 {} 个会话并提升版本 -> 旧访问令牌将以 SESSION_STATE_CHANGED 拒绝",
+                affected);
     }
 
     private TokenPair issuePair(Session session) {

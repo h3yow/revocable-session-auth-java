@@ -81,4 +81,17 @@ public final class Session {
     synchronized void revoke() {
         this.revoked = true;
     }
+
+    /**
+     * 撤销会话，返回本次调用是否把状态从"未撤销"翻转为"已撤销"。
+     * 反复下线同一条会话：第一次返回 true，之后恒为 false，结果稳定可重复。
+     * 监视器与 {@link #revoke()} / 刷新换发临界区相同。
+     */
+    synchronized boolean revokeIfActive() {
+        if (this.revoked) {
+            return false;
+        }
+        this.revoked = true;
+        return true;
+    }
 }

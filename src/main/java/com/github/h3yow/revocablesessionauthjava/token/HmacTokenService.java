@@ -20,8 +20,13 @@ import org.springframework.stereotype.Component;
  * <p>
  * 校验顺序与失败分类（对外仅给分类，底层异常只记日志）：
  * <ol>
- *   <li>结构/编码/JSON 无法解析 -> MALFORMED_TOKEN</li>
- *   <li>签名不匹配或内容被篡改 -> INVALID_SIGNATURE</li>
+ *   <li>结构/编码/JSON 无法解析、claims 缺必填字段 -> MALFORMED_TOKEN</li>
+ *   <li>签名不匹配时进一步区分：
+ *     <ul>
+ *       <li>载荷字节不是签发端的规范化产物（claims 被改写后重新拼装）-> TAMPERED_TOKEN</li>
+ *       <li>载荷本身完好，仅签名对不上（伪造签名段、跨密钥签发）-> INVALID_SIGNATURE</li>
+ *     </ul>
+ *   </li>
  *   <li>expiresAt &lt;= now -> EXPIRED</li>
  *   <li>令牌类型与使用场景不符 -> WRONG_TOKEN_TYPE</li>
  * </ol>
@@ -101,12 +106,7 @@ public class HmacTokenService implements TokenService {
             throw malformed(compactToken, "base64url 解码失败: " + e.getClass().getSimpleName());
         }
 
-        byte[] expected = hmac(payload);
-        if (!constantTimeEquals(expected, signature)) {
-            log.warn("令牌签名校验失败（可能伪造或被篡改） expectedType={}", expectedType);
-            throw new AuthException(AuthFailureReason.INVALID_SIGNATURE, "signature mismatch");
-        }
-
+        // 先解析 claims：JSON 无法解析或缺少必填字段属于"结构本身不合法"
         TokenClaims claims;
         try {
             claims = objectMapper.readValue(claimsBytes, TokenClaims.class);
@@ -115,6 +115,28 @@ public class HmacTokenService implements TokenService {
         }
         if (claims.tokenId() == null || claims.sessionId() == null || claims.type() == null) {
             throw malformed(compactToken, "claims 缺少必填字段");
+        }
+
+        // 再验签；签名对不上时区分"载荷被改动"与"仅签名对不上"
+        byte[] expected = hmac(payload);
+        if (!constantTimeEquals(expected, signature)) {
+            // 把 claims 按签发端规范化重新序列化，与提交的载荷逐字节比对：
+            // 不一致 -> 载荷内容被改动过（TAMPERED_TOKEN）；
+            // 一致   -> 载荷是签发端原始产物，只是签名段对不上（伪造签名/跨密钥）。
+            String canonicalPayload;
+            try {
+                canonicalPayload = encoder.encodeToString(objectMapper.writeValueAsBytes(claims));
+            } catch (Exception e) {
+                log.warn("令牌 claims 规范化重编码失败 expectedType={}", expectedType);
+                canonicalPayload = null;
+            }
+            if (canonicalPayload == null || !canonicalPayload.equals(payload)) {
+                log.warn("令牌内容被篡改：载荷非签发端规范化字节 expectedType={}", expectedType);
+                throw new AuthException(AuthFailureReason.TAMPERED_TOKEN,
+                        "payload bytes differ from issuer canonical form");
+            }
+            log.warn("令牌签名校验失败（伪造签名或跨密钥） expectedType={}", expectedType);
+            throw new AuthException(AuthFailureReason.INVALID_SIGNATURE, "signature mismatch");
         }
 
         if (claims.expiresAt() <= clock.millis()) {
