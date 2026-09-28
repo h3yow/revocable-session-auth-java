@@ -15,11 +15,18 @@ public interface SessionStore {
 
     List<Session> findSessionsByUsername(String username);
 
+    /** 查询用户当前仍生效（未撤销）的会话，供管理员会话概览使用。 */
+    List<Session> findActiveSessionsByUsername(String username);
+
     void saveRefreshToken(RefreshTokenRecord record);
 
     Optional<RefreshTokenRecord> findRefreshToken(String jti);
 
     void deleteRefreshToken(String jti);
 
-    void revokeSession(String sessionId);
+    /**
+     * 撤销指定会话。幂等：会话不存在返回 false；会话存在（无论此前是否已撤销）返回 true，
+     * 重复撤销不会产生底层错误。
+     */
+    boolean revokeSession(String sessionId);
 }

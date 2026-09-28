@@ -20,17 +20,20 @@ public class ApiExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
-    /** 未认证（缺令牌/格式/签名/过期/撤销/状态变更/刷新重用/未知令牌/凭据错误）-> 401。 */
+    /**
+     * 未认证（缺令牌/格式/签名/过期/撤销/状态变更/刷新重用/未知令牌/凭据错误）-> 401；
+     * 已认证但权限不足 -> 403；管理员操作的目标用户不存在 -> 404。
+     */
     @ExceptionHandler(AuthException.class)
     public ResponseEntity<Map<String, String>> handleAuth(AuthException ex) {
         AuthFailureReason reason = ex.reason();
         // internalDetail 仅进入日志，不返回给调用方
         log.warn("鉴权失败 reason={} internalDetail={}", reason.code(), ex.internalDetail());
-        HttpStatus status = reason == AuthFailureReason.ACCESS_DENIED
-                ? HttpStatus.FORBIDDEN
-                : (reason == AuthFailureReason.BAD_CREDENTIALS
-                        ? HttpStatus.UNAUTHORIZED
-                        : HttpStatus.UNAUTHORIZED);
+        HttpStatus status = switch (reason) {
+            case ACCESS_DENIED -> HttpStatus.FORBIDDEN;
+            case USER_NOT_FOUND -> HttpStatus.NOT_FOUND;
+            default -> HttpStatus.UNAUTHORIZED;
+        };
         return ResponseEntity.status(status)
                 .body(Map.of("error", reason.code(), "message", reason.description()));
     }

@@ -15,8 +15,11 @@ public enum AuthFailureReason {
     SESSION_STATE_CHANGED("session_state_changed", "会话状态已变更，旧令牌不再有效"),
     REFRESH_TOKEN_REUSED("refresh_token_reused", "刷新令牌已被使用，不能重复换取"),
     UNKNOWN_TOKEN("unknown_token", "令牌不存在或已失效"),
+    SESSION_NOT_FOUND("session_not_found", "服务端不存在该会话"),
+    TOKEN_SESSION_MISMATCH("token_session_mismatch", "令牌与当前会话或用户不匹配"),
     ACCESS_DENIED("access_denied", "权限不足"),
-    BAD_CREDENTIALS("bad_credentials", "用户名或密码错误");
+    BAD_CREDENTIALS("bad_credentials", "用户名或密码错误"),
+    USER_NOT_FOUND("user_not_found", "用户不存在");
 
     private final String code;
     private final String description;

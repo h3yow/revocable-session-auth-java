@@ -35,6 +35,13 @@ public class InMemorySessionStore implements SessionStore {
     }
 
     @Override
+    public List<Session> findActiveSessionsByUsername(String username) {
+        return sessions.values().stream()
+                .filter(s -> s.username().equals(username) && !s.revoked())
+                .toList();
+    }
+
+    @Override
     public void saveRefreshToken(RefreshTokenRecord record) {
         refreshTokens.put(record.jti(), record);
     }
@@ -50,10 +57,14 @@ public class InMemorySessionStore implements SessionStore {
     }
 
     @Override
-    public void revokeSession(String sessionId) {
+    public boolean revokeSession(String sessionId) {
         Session session = sessions.get(sessionId);
-        if (session != null) {
+        if (session == null) {
+            return false;
+        }
+        synchronized (session.lock()) {
             session.revoke();
         }
+        return true;
     }
 }
